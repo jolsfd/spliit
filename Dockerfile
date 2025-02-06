@@ -1,49 +1,47 @@
 FROM node:21-alpine AS base
 
+RUN apk add --no-cache libc6-compat
+
 WORKDIR /usr/app
-COPY ./package.json \
-     ./package-lock.json \
-     ./next.config.mjs \
-     ./tsconfig.json \
-     ./reset.d.ts \
-     ./tailwind.config.js \
-     ./postcss.config.js ./
-COPY ./scripts ./scripts
-COPY ./prisma ./prisma
-
-RUN apk add --no-cache openssl && \
-    npm ci --ignore-scripts && \
-    npx prisma generate
-
-COPY ./src ./src
-COPY ./messages ./messages
 
 ENV NEXT_TELEMETRY_DISABLED=1
 
-COPY scripts/build.env .env
-RUN npm run build
+RUN corepack enable
+
+
+FROM base AS builder
+
+WORKDIR /usr/app
+
+COPY ./ ./
+
+COPY ./scripts/build.env .env
+
+RUN apk add --no-cache openssl
+RUN pnpm i --ignore-scripts
+RUN pnpm dlx prisma generate
+
+RUN pnpm run build
 
 RUN rm -r .next/cache
 
-FROM node:21-alpine AS runtime-deps
+
+FROM base AS runner
 
 WORKDIR /usr/app
-COPY --from=base /usr/app/package.json /usr/app/package-lock.json /usr/app/next.config.mjs ./
-COPY --from=base /usr/app/prisma ./prisma
 
-RUN npm ci --omit=dev --omit=optional --ignore-scripts && \
-    npx prisma generate
+COPY ./scripts/entrypoint.sh ./entrypoint.sh
+COPY ./prisma ./prisma
 
-FROM node:21-alpine AS runner
+COPY --from=builder /usr/app/.next/standalone/ ./
+COPY --from=builder /usr/app/.next/static/ ./.next/static/
+COPY --from=builder /usr/app/public/ ./public
 
-EXPOSE 3000/tcp
-WORKDIR /usr/app
+ENV NODE_ENV=production
+ENV NEXT_TELEMETRY_DISABLED=1
 
-COPY --from=base /usr/app/package.json /usr/app/package-lock.json /usr/app/next.config.mjs ./
-COPY --from=runtime-deps /usr/app/node_modules ./node_modules
-COPY ./public ./public
-COPY ./scripts ./scripts
-COPY --from=base /usr/app/prisma ./prisma
-COPY --from=base /usr/app/.next ./.next
 
-ENTRYPOINT ["/bin/sh", "/usr/app/scripts/container-entrypoint.sh"]
+EXPOSE 3000
+ENV HOSTNAME="0.0.0.0"
+ENV PORT=3000
+ENTRYPOINT ["/bin/sh", "/usr/app/entrypoint.sh"]
